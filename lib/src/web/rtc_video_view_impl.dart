@@ -172,7 +172,6 @@ class RTCVideoViewState extends State<RTCVideoView> {
                       RTCVideoViewObjectFit.RTCVideoViewObjectFitCover =>
                         BoxFit.cover,
                     },
-                    clipBehavior: Clip.hardEdge,
                     child: SizedBox(
                         width: capturedFrame!.width.toDouble(),
                         height: capturedFrame!.height.toDouble(),

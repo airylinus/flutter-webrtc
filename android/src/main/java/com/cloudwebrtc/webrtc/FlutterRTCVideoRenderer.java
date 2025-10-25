@@ -92,6 +92,11 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
 
     private final SurfaceTextureRenderer surfaceTextureRenderer;
 
+    // Public getter for SurfaceTextureRenderer (used by FrameStreamer)
+    public SurfaceTextureRenderer getSurfaceTextureRenderer() {
+        return surfaceTextureRenderer;
+    }
+
     /**
      * The {@code VideoTrack}, if any, rendered by this {@code FlutterRTCVideoRenderer}.
      */

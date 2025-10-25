@@ -26,6 +26,9 @@ import io.flutter.embedding.engine.plugins.lifecycle.HiddenLifecycleReference;
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.MethodChannel;
+import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
+import io.flutter.plugin.common.MethodChannel.Result;
+import io.flutter.plugin.common.MethodCall;
 import io.flutter.view.TextureRegistry;
 
 /**
@@ -41,6 +44,12 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
     private LifeCycleObserver observer;
     private Lifecycle lifecycle;
     private EventChannel eventChannel;
+
+    // Frame stream channels
+    private EventChannel frameEventChannel;
+    private EventChannel.EventSink frameSink;
+    private MethodChannel frameCtlChannel;
+    private FrameStreamer frameStreamer;
 
     // eventSink is static because FlutterWebRTCPlugin can be instantiated multiple times
     // but the onListen(Object, EventChannel.EventSink) event only fires once for the first
@@ -118,6 +127,22 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
         methodChannel.setMethodCallHandler(methodCallHandler);
         eventChannel = new EventChannel( messenger,"FlutterWebRTC.Event");
         eventChannel.setStreamHandler(this);
+
+        // Register frame stream channels
+        frameEventChannel = new EventChannel(messenger, "com.example.swoshpro/webrtc_frames");
+        frameEventChannel.setStreamHandler(new EventChannel.StreamHandler() {
+            @Override
+            public void onListen(Object args, EventChannel.EventSink events) {
+                frameSink = events;
+            }
+            @Override
+            public void onCancel(Object args) {
+                frameSink = null;
+            }
+        });
+        frameCtlChannel = new MethodChannel(messenger, "com.example.swoshpro/webrtc_frames_ctl");
+        frameCtlChannel.setMethodCallHandler(new FrameControlHandler());
+
         AudioSwitchManager.instance.audioDeviceChangeListener = (devices, currentDevice) -> {
             Log.w(TAG, "audioFocusChangeListener " + devices+ " " + currentDevice);
             ConstraintsMap params = new ConstraintsMap();
@@ -132,6 +157,16 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
         methodCallHandler = null;
         methodChannel.setMethodCallHandler(null);
         eventChannel.setStreamHandler(null);
+        if (frameStreamer != null) {
+            frameStreamer.stop();
+            frameStreamer = null;
+        }
+        if (frameCtlChannel != null) {
+            frameCtlChannel.setMethodCallHandler(null);
+        }
+        if (frameEventChannel != null) {
+            frameEventChannel.setStreamHandler(null);
+        }
         if (AudioSwitchManager.instance != null) {
             Log.d(TAG, "Stopping the audio manager...");
             AudioSwitchManager.instance.stop();
@@ -197,6 +232,49 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
         @Override
         public void onActivityDestroyed(Activity activity) {
 
+        }
+    }
+
+    // Handler for frame control method channel
+    private class FrameControlHandler implements MethodCallHandler {
+        @Override
+        public void onMethodCall(MethodCall call, Result result) {
+            if ("startTextureFrameStream".equals(call.method)) {
+                if (frameSink == null) {
+                    result.error("NO_EVENT", "frame EventChannel not listening", null);
+                    return;
+                }
+                Integer textureId = call.argument("textureId");
+                Integer width = call.argument("width");
+                Integer height = call.argument("height");
+                Integer fps = call.argument("fps");
+
+                if (textureId == null || width == null || height == null || fps == null) {
+                    result.error("INVALID_ARGS", "Missing required arguments", null);
+                    return;
+                }
+
+                FlutterRTCVideoRenderer renderer = methodCallHandler.getRenderer(textureId);
+                if (renderer == null) {
+                    result.error("NO_RENDERER", "renderer not found for textureId: " + textureId, null);
+                    return;
+                }
+                if (frameStreamer != null) {
+                    frameStreamer.stop();
+                    frameStreamer = null;
+                }
+                frameStreamer = new FrameStreamer(renderer, width, height, fps, frameSink);
+                frameStreamer.start();
+                result.success(true);
+            } else if ("stopTextureFrameStream".equals(call.method)) {
+                if (frameStreamer != null) {
+                    frameStreamer.stop();
+                    frameStreamer = null;
+                }
+                result.success(true);
+            } else {
+                result.notImplemented();
+            }
         }
     }
 }

@@ -115,6 +115,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   private final Map<String, LocalTrack> localTracks = new HashMap<>();
   private final LongSparseArray<FlutterRTCVideoRenderer> renders = new LongSparseArray<>();
 
+  // Public getter for renderer access (used by FrameStreamer)
+  public FlutterRTCVideoRenderer getRenderer(int textureId) {
+    return renders.get(textureId);
+  }
+
   public RecordSamplesReadyCallbackAdapter recordSamplesReadyCallbackAdapter;
 
   public PlaybackSamplesReadyCallbackAdapter playbackSamplesReadyCallbackAdapter;

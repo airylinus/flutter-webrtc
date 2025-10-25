@@ -1,6 +1,8 @@
 package com.cloudwebrtc.webrtc;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -28,6 +30,40 @@ class FrameStreamer {
     private boolean running = false;
     private long lastTs = 0;
     private EglRenderer.FrameListener frameListener;
+    // Reusable buffers to avoid per-frame allocations
+    private byte[] buf0, buf1;
+    private ByteBuffer bb0, bb1;
+    private int bufferSize = 0;
+    private int ping = 0;
+
+    // Reusable target bitmaps and canvases to eliminate per-frame createScaledBitmap
+    private Bitmap target0, target1;
+    private Canvas canvas0, canvas1;
+    // Destination rect is calculated per-frame to preserve aspect ratio (letterbox)
+    private final Rect srcRect = new Rect();
+
+    private void ensureBuffers() {
+        int needed = targetW * targetH * 4;
+        if (bufferSize != needed || buf0 == null || buf1 == null || bb0 == null || bb1 == null) {
+            bufferSize = needed;
+            buf0 = new byte[needed];
+            buf1 = new byte[needed];
+            bb0 = ByteBuffer.wrap(buf0);
+            bb1 = ByteBuffer.wrap(buf1);
+        }
+    }
+
+    private void ensureTargets() {
+        if (target0 == null || target0.getWidth() != targetW || target0.getHeight() != targetH) {
+            target0 = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888);
+            canvas0 = new Canvas(target0);
+        }
+        if (target1 == null || target1.getWidth() != targetW || target1.getHeight() != targetH) {
+            target1 = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888);
+            canvas1 = new Canvas(target1);
+        }
+    }
+
 
     FrameStreamer(FlutterRTCVideoRenderer renderer, int w, int h, int fps, EventChannel.EventSink sink) {
         this.renderer = renderer;
@@ -51,27 +87,42 @@ class FrameStreamer {
                 }
                 lastTs = now;
 
-                Bitmap scaled = Bitmap.createScaledBitmap(bitmap, targetW, targetH, false);
-                int size = targetW * targetH * 4;
-                ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                scaled.copyPixelsToBuffer(buffer);
-                buffer.rewind();
+                // Draw into reusable target bitmap via Canvas to avoid per-frame allocations
+                ensureTargets();
+                ensureBuffers();
+                Canvas canvas = (ping == 0) ? canvas0 : canvas1;
+                Bitmap target = (ping == 0) ? target0 : target1;
 
-                // Convert ByteBuffer to byte array for EventChannel
-                byte[] bytes = new byte[size];
-                buffer.get(bytes);
+                int srcW = bitmap.getWidth();
+                int srcH = bitmap.getHeight();
+                srcRect.set(0, 0, srcW, srcH);
+
+                // Preserve aspect ratio: letterbox into targetW x targetH
+                float scale = Math.min((float) targetW / srcW, (float) targetH / srcH);
+                int drawW = Math.round(srcW * scale);
+                int drawH = Math.round(srcH * scale);
+                int padX = (targetW - drawW) / 2;
+                int padY = (targetH - drawH) / 2;
+                Rect dst = new Rect(padX, padY, padX + drawW, padY + drawH);
+                canvas.drawBitmap(bitmap, srcRect, dst, null);
+
+                ByteBuffer buffer = (ping == 0) ? bb0 : bb1;
+                byte[] bytes = (ping == 0) ? buf0 : buf1;
+                buffer.clear();
+                target.copyPixelsToBuffer(buffer);
+                buffer.rewind();
+                ping ^= 1;
 
                 Map<String, Object> map = new HashMap<>();
                 map.put("bytes", bytes);
                 map.put("width", targetW);
                 map.put("height", targetH);
+                map.put("srcW", srcW);
+                map.put("srcH", srcH);
                 map.put("ts_us", now / 1000);
-                sink.success(map);
-                
-                // Clean up scaled bitmap
-                if (scaled != bitmap) {
-                    scaled.recycle();
-                }
+
+                // EventChannel requires main thread
+                mainHandler.post(() -> sink.success(map));
             }
         };
         renderer.getSurfaceTextureRenderer().addFrameListener(frameListener, 1.0f);

@@ -28,8 +28,10 @@ class FrameStreamer {
     private final EventChannel.EventSink sink;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private boolean running = false;
+    private boolean processing = false; // guard to avoid piling up when UI is busy
     private long lastTs = 0;
     private EglRenderer.FrameListener frameListener;
+    private final float scaleHint; // downscale at source to reduce load
     // Reusable buffers to avoid per-frame allocations
     private byte[] buf0, buf1;
     private ByteBuffer bb0, bb1;
@@ -71,6 +73,9 @@ class FrameStreamer {
         this.targetH = h;
         this.fps = Math.max(1, fps);
         this.sink = sink;
+        // Heuristic: downscale source bitmap before our own letterbox to reduce CPU/GPU load.
+        // Typical camera frames are >= 720p; for 640x640 target, 0.66 is sufficient.
+        this.scaleHint = Math.min(1.0f, (float) Math.max(this.targetW, this.targetH) / 960.0f);
     }
 
     void start() {
@@ -80,6 +85,8 @@ class FrameStreamer {
             @Override
             public void onFrame(@Nullable Bitmap bitmap) {
                 if (!running || bitmap == null) return;
+                if (processing) return; // drop if previous frame still processing
+
                 long now = System.nanoTime();
                 if (lastTs != 0) {
                     double intervalNs = 1_000_000_000.0 / fps;
@@ -87,45 +94,50 @@ class FrameStreamer {
                 }
                 lastTs = now;
 
-                // Draw into reusable target bitmap via Canvas to avoid per-frame allocations
-                ensureTargets();
-                ensureBuffers();
-                Canvas canvas = (ping == 0) ? canvas0 : canvas1;
-                Bitmap target = (ping == 0) ? target0 : target1;
+                processing = true;
+                try {
+                    // Draw into reusable target bitmap via Canvas to avoid per-frame allocations
+                    ensureTargets();
+                    ensureBuffers();
+                    Canvas canvas = (ping == 0) ? canvas0 : canvas1;
+                    Bitmap target = (ping == 0) ? target0 : target1;
 
-                int srcW = bitmap.getWidth();
-                int srcH = bitmap.getHeight();
-                srcRect.set(0, 0, srcW, srcH);
+                    int srcW = bitmap.getWidth();
+                    int srcH = bitmap.getHeight();
+                    srcRect.set(0, 0, srcW, srcH);
 
-                // Preserve aspect ratio: letterbox into targetW x targetH
-                float scale = Math.min((float) targetW / srcW, (float) targetH / srcH);
-                int drawW = Math.round(srcW * scale);
-                int drawH = Math.round(srcH * scale);
-                int padX = (targetW - drawW) / 2;
-                int padY = (targetH - drawH) / 2;
-                Rect dst = new Rect(padX, padY, padX + drawW, padY + drawH);
-                canvas.drawBitmap(bitmap, srcRect, dst, null);
+                    // Preserve aspect ratio: letterbox into targetW x targetH
+                    float scale = Math.min((float) targetW / srcW, (float) targetH / srcH);
+                    int drawW = Math.round(srcW * scale);
+                    int drawH = Math.round(srcH * scale);
+                    int padX = (targetW - drawW) / 2;
+                    int padY = (targetH - drawH) / 2;
+                    Rect dst = new Rect(padX, padY, padX + drawW, padY + drawH);
+                    canvas.drawBitmap(bitmap, srcRect, dst, null);
 
-                ByteBuffer buffer = (ping == 0) ? bb0 : bb1;
-                byte[] bytes = (ping == 0) ? buf0 : buf1;
-                buffer.clear();
-                target.copyPixelsToBuffer(buffer);
-                buffer.rewind();
-                ping ^= 1;
+                    ByteBuffer buffer = (ping == 0) ? bb0 : bb1;
+                    byte[] bytes = (ping == 0) ? buf0 : buf1;
+                    buffer.clear();
+                    target.copyPixelsToBuffer(buffer);
+                    buffer.rewind();
+                    ping ^= 1;
 
-                Map<String, Object> map = new HashMap<>();
-                map.put("bytes", bytes);
-                map.put("width", targetW);
-                map.put("height", targetH);
-                map.put("srcW", srcW);
-                map.put("srcH", srcH);
-                map.put("ts_us", now / 1000);
+                    Map<String, Object> map = new HashMap<>();
+                    map.put("bytes", bytes);
+                    map.put("width", targetW);
+                    map.put("height", targetH);
+                    map.put("srcW", srcW);
+                    map.put("srcH", srcH);
+                    map.put("ts_us", now / 1000);
 
-                // EventChannel requires main thread
-                mainHandler.post(() -> sink.success(map));
+                    // EventChannel requires main thread
+                    mainHandler.post(() -> sink.success(map));
+                } finally {
+                    processing = false;
+                }
             }
         };
-        renderer.getSurfaceTextureRenderer().addFrameListener(frameListener, 1.0f);
+        renderer.getSurfaceTextureRenderer().addFrameListener(frameListener, scaleHint);
     }
 
     void stop() {

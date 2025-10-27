@@ -133,10 +133,12 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
         frameEventChannel.setStreamHandler(new EventChannel.StreamHandler() {
             @Override
             public void onListen(Object args, EventChannel.EventSink events) {
+                Log.i(TAG, "[EventChannel] onListen called, setting frameSink");
                 frameSink = events;
             }
             @Override
             public void onCancel(Object args) {
+                Log.i(TAG, "[EventChannel] onCancel called, clearing frameSink");
                 frameSink = null;
             }
         });

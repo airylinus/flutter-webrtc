@@ -28,6 +28,8 @@ public class SurfaceTextureRenderer extends EglRenderer {
   private final Object layoutLock = new Object();
   private boolean isRenderingPaused;
   private boolean isFirstFrameRendered;
+  // Optional callback for first frame readiness (used by FrameStreamer)
+  private Runnable firstFrameCallback;
   private int rotatedFrameWidth;
   private int rotatedFrameHeight;
   private int frameRotation;
@@ -57,6 +59,7 @@ public class SurfaceTextureRenderer extends EglRenderer {
     this.rendererEvents = rendererEvents;
     synchronized (layoutLock) {
       isFirstFrameRendered = false;
+      firstFrameCallback = null;
       rotatedFrameWidth = 0;
       rotatedFrameHeight = 0;
       frameRotation = -1;
@@ -139,12 +142,16 @@ public class SurfaceTextureRenderer extends EglRenderer {
 
   // Update frame dimensions and report any changes to |rendererEvents|.
   private void updateFrameDimensionsAndReportEvents(VideoFrame frame) {
+    Runnable cbToRun = null;
     synchronized (layoutLock) {
       if (isRenderingPaused) {
         return;
       }
       if (!isFirstFrameRendered) {
         isFirstFrameRendered = true;
+        // Steal and clear callback under lock
+        cbToRun = firstFrameCallback;
+        firstFrameCallback = null;
         if (rendererEvents != null) {
           rendererEvents.onFirstFrameRendered();
         }
@@ -161,6 +168,33 @@ public class SurfaceTextureRenderer extends EglRenderer {
         producer.setSize(rotatedFrameWidth, rotatedFrameHeight);
         frameRotation = frame.getRotation();
       }
+    }
+    if (cbToRun != null) {
+      cbToRun.run();
+    }
+  }
+
+  // ---- Helpers for external readiness checks ----
+  public boolean hasFirstFrame() {
+    synchronized (layoutLock) {
+      return isFirstFrameRendered;
+    }
+  }
+
+  public void setFirstFrameCallback(Runnable cb) {
+    ThreadUtils.checkIsOnMainThread();
+    synchronized (layoutLock) {
+      if (isFirstFrameRendered) {
+        if (cb != null) cb.run();
+      } else {
+        firstFrameCallback = cb;
+      }
+    }
+  }
+
+  public void clearFirstFrameCallback() {
+    synchronized (layoutLock) {
+      firstFrameCallback = null;
     }
   }
 }

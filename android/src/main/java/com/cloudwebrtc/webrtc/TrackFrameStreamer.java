@@ -64,23 +64,20 @@ class TrackFrameStreamer implements VideoSink {
       int srcW = buffer.getWidth();
       int srcH = buffer.getHeight();
 
-      // Center-crop to square to preserve FOV for MoveNet input
-      int cropW, cropH, cropX, cropY;
-      if (srcW > srcH) {
-        cropH = srcH;
-        cropW = srcH;
-        cropX = (srcW - cropW) / 2;
-        cropY = 0;
-      } else {
-        cropW = srcW;
-        cropH = srcW;
-        cropX = 0;
-        cropY = (srcH - cropH) / 2;
-      }
+      // 新策略：摄像端已设置为最小边 640，训练端只需裁剪中间 640x640
+      // 无需缩放，直接裁剪，节省计算资源
+      int cropX = (srcW - targetW) / 2;
+      int cropY = (srcH - targetH) / 2;
 
-      // Scale to target size using WebRTC's built-in scaler
-      Buffer scaled = buffer.cropAndScale(cropX, cropY, cropW, cropH, targetW, targetH);
-      I420Buffer out = scaled.toI420();
+      // 确保裁剪区域不超出边界
+      if (cropX < 0) cropX = 0;
+      if (cropY < 0) cropY = 0;
+      if (cropX + targetW > srcW) cropX = srcW - targetW;
+      if (cropY + targetH > srcH) cropY = srcH - targetH;
+
+      // 直接裁剪中间区域（无缩放）
+      Buffer cropped = buffer.cropAndScale(cropX, cropY, targetW, targetH, targetW, targetH);
+      I420Buffer out = cropped.toI420();
 
       try {
         // Convert I420 -> RGB (uint8)
@@ -102,7 +99,7 @@ class TrackFrameStreamer implements VideoSink {
         sink.success(map);
       } finally {
         out.release();
-        scaled.release();
+        cropped.release();
       }
     } catch (Throwable t) {
       Log.e(FlutterWebRTCPlugin.TAG, "[TrackFrameStreamer] onFrame error: " + t.getMessage());

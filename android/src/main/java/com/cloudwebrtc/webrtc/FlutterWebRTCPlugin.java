@@ -49,7 +49,7 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
     private EventChannel frameEventChannel;
     private EventChannel.EventSink frameSink;
     private MethodChannel frameCtlChannel;
-    private FrameStreamer frameStreamer;
+    private TrackFrameStreamer trackStreamer;
 
     // eventSink is static because FlutterWebRTCPlugin can be instantiated multiple times
     // but the onListen(Object, EventChannel.EventSink) event only fires once for the first
@@ -134,7 +134,8 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
             @Override
             public void onListen(Object args, EventChannel.EventSink events) {
                 Log.i(TAG, "[EventChannel] onListen called, setting frameSink");
-                frameSink = events;
+                // Wrap with AnyThreadSink to allow calling from non-UI threads safely
+                frameSink = new AnyThreadSink(events);
             }
             @Override
             public void onCancel(Object args) {
@@ -159,9 +160,9 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
         methodCallHandler = null;
         methodChannel.setMethodCallHandler(null);
         eventChannel.setStreamHandler(null);
-        if (frameStreamer != null) {
-            frameStreamer.stop();
-            frameStreamer = null;
+        if (trackStreamer != null) {
+            trackStreamer.stop();
+            trackStreamer = null;
         }
         if (frameCtlChannel != null) {
             frameCtlChannel.setMethodCallHandler(null);
@@ -261,17 +262,22 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
                     result.error("NO_RENDERER", "renderer not found for textureId: " + textureId, null);
                     return;
                 }
-                if (frameStreamer != null) {
-                    frameStreamer.stop();
-                    frameStreamer = null;
+                if (trackStreamer != null) {
+                    trackStreamer.stop();
+                    trackStreamer = null;
                 }
-                frameStreamer = new FrameStreamer(renderer, width, height, fps, frameSink);
-                frameStreamer.start();
+                org.webrtc.VideoTrack track = renderer.getVideoTrack();
+                if (track == null) {
+                    result.error("NO_TRACK", "video track not attached to renderer", null);
+                    return;
+                }
+                trackStreamer = new TrackFrameStreamer(track, width, height, fps, frameSink);
+                trackStreamer.start();
                 result.success(true);
             } else if ("stopTextureFrameStream".equals(call.method)) {
-                if (frameStreamer != null) {
-                    frameStreamer.stop();
-                    frameStreamer = null;
+                if (trackStreamer != null) {
+                    trackStreamer.stop();
+                    trackStreamer = null;
                 }
                 result.success(true);
             } else {

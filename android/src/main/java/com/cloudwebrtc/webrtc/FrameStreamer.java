@@ -98,6 +98,9 @@ class FrameStreamer {
                 Log.d(FlutterWebRTCPlugin.TAG, "[FrameStreamer] onFrame: " + bitmap.getWidth() + "x" + bitmap.getHeight());
                 if (processing) return; // drop if previous frame still processing
 
+                // Mark as not attached immediately to prevent race conditions
+                listenerAttached = false;
+
                 long now = System.nanoTime();
                 if (lastTs != 0) {
                     double intervalNs = 1_000_000_000.0 / fps;
@@ -175,17 +178,31 @@ class FrameStreamer {
                     processing = false;
                 }
 
-                // CRITICAL: Re-attach for continuous frames (addFrameListener is one-shot).
-                // Must be done AFTER onFrame callback completes, so post to next message loop.
-                // Cannot call addFrameListener directly inside onFrame callback due to internal locks.
-                listenerAttached = false;
-                mainHandler.post(() -> {
-                    if (running && !listenerAttached) {
+                // CRITICAL: Synchronous re-attach IMMEDIATELY after processing
+                // This ensures the listener is ready before the next frame arrives
+                // postDelayed caused timing issues where frames arrived before re-attach completed
+                if (running && !listenerAttached) {
+                    try {
                         listenerAttached = true;
-                        Log.d(FlutterWebRTCPlugin.TAG, "[FrameStreamer] Re-attaching listener for continuous frames");
+                        Log.d(FlutterWebRTCPlugin.TAG, "[FrameStreamer] Re-attaching listener synchronously");
                         renderer.getSurfaceTextureRenderer().addFrameListener(frameListener, scaleHint);
+                    } catch (Exception e) {
+                        Log.e(FlutterWebRTCPlugin.TAG, "[FrameStreamer] Sync re-attach failed: " + e.getMessage());
+                        listenerAttached = false;
+                        // Only use async retry if sync fails
+                        mainHandler.postDelayed(() -> {
+                            if (running && !listenerAttached) {
+                                try {
+                                    listenerAttached = true;
+                                    renderer.getSurfaceTextureRenderer().addFrameListener(frameListener, scaleHint);
+                                } catch (Exception ex) {
+                                    Log.e(FlutterWebRTCPlugin.TAG, "[FrameStreamer] Async retry failed: " + ex.getMessage());
+                                    listenerAttached = false;
+                                }
+                            }
+                        }, 50);
                     }
-                });
+                }
             }
         };
 

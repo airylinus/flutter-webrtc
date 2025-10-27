@@ -102,6 +102,12 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
      */
     private VideoTrack videoTrack;
 
+    // Expose current VideoTrack for track-level frame sink
+    public VideoTrack getVideoTrack() {
+        return videoTrack;
+    }
+
+
     EventChannel eventChannel;
     EventChannel.EventSink eventSink;
 

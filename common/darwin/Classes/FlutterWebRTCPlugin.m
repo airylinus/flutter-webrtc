@@ -15,6 +15,7 @@
 #import "FlutterRTCVideoPlatformViewController.h"
 #endif
 #import "AudioManager.h"
+#import "FrameStreamerIOS.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <WebRTC/RTCFieldTrials.h>
@@ -97,6 +98,40 @@ void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event) {
     });
 }
 
+
+// Forward declare helpers so SPFrameEventHandler can call them without header exposure
+@interface FlutterWebRTCPlugin (SPFrameSinkMethods)
+- (void)sp_setFrameSink:(FlutterEventSink)sink;
+- (void)sp_clearFrameSink;
+@end
+
+
+
+
+// Lightweight stream handler to capture EventChannel sink for native frame stream
+@class FlutterWebRTCPlugin;
+@interface SPFrameEventHandler : NSObject<FlutterStreamHandler>
+@property(nonatomic, weak) FlutterWebRTCPlugin* plugin;
+- (instancetype)initWithPlugin:(FlutterWebRTCPlugin*)plugin;
+@end
+
+@implementation SPFrameEventHandler
+- (instancetype)initWithPlugin:(FlutterWebRTCPlugin*)plugin {
+  self = [super init];
+  if (self) { _plugin = plugin; }
+  return self;
+}
+- (FlutterError* _Nullable)onListenWithArguments:(id _Nullable)arguments eventSink:(FlutterEventSink)events {
+  [self.plugin sp_setFrameSink:events];
+  return nil;
+}
+- (FlutterError* _Nullable)onCancelWithArguments:(id _Nullable)arguments {
+  [self.plugin sp_clearFrameSink];
+  return nil;
+}
+@end
+
+
 @implementation FlutterWebRTCPlugin {
 #pragma clang diagnostic pop
   FlutterMethodChannel* _methodChannel;
@@ -114,6 +149,11 @@ void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event) {
 #endif
 
   RTC_OBJC_TYPE(RTCCallbackLogger) * loggerCallback;
+  // SwoshPro native frame stream (iOS)
+  FlutterEventChannel* _spFrameEventChannel;
+  FlutterEventSink _spFrameSink;
+  FlutterMethodChannel* _spFrameCtlChannel;
+  NSMutableDictionary<NSNumber*, FrameStreamerIOS*>* _spStreamers;
 }
 
 static FlutterWebRTCPlugin *sharedSingleton;
@@ -130,6 +170,15 @@ static FlutterWebRTCPlugin *sharedSingleton;
 @synthesize eventSink = _eventSink;
 @synthesize preferredInput = _preferredInput;
 @synthesize audioManager = _audioManager;
+
+
+// SwoshPro helper methods to set/clear frame event sink safely
+- (void)sp_setFrameSink:(FlutterEventSink)sink {
+  _spFrameSink = sink;
+}
+- (void)sp_clearFrameSink {
+  _spFrameSink = nil;
+}
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
   FlutterMethodChannel* channel =
@@ -173,6 +222,53 @@ static FlutterWebRTCPlugin *sharedSingleton;
     _speakerOnButPreferBluetooth = NO;
     _eventChannel = eventChannel;
     _audioManager = AudioManager.sharedInstance;
+
+    // Setup SwoshPro frame stream channels (iOS)
+    _spStreamers = [NSMutableDictionary new];
+    _spFrameEventChannel = [FlutterEventChannel eventChannelWithName:@"com.example.swoshpro/webrtc_frames" binaryMessenger:messenger];
+    [_spFrameEventChannel setStreamHandler:[[SPFrameEventHandler alloc] initWithPlugin:self]];
+    _spFrameCtlChannel = [FlutterMethodChannel methodChannelWithName:@"com.example.swoshpro/webrtc_frames_ctl" binaryMessenger:messenger];
+    __weak typeof(self) weakSelf = self;
+    [_spFrameCtlChannel setMethodCallHandler:^(FlutterMethodCall* call, FlutterResult result) {
+      __strong typeof(weakSelf) strongSelf = weakSelf;
+      if ([call.method isEqualToString:@"startTextureFrameStream"]) {
+
+        if (!strongSelf || !strongSelf->_spFrameSink) {
+          result([FlutterError errorWithCode:@"NO_EVENT" message:@"frame EventChannel not listening" details:nil]);
+          return;
+        }
+        NSDictionary* args = call.arguments;
+        NSNumber* textureId = args[@"textureId"];
+        NSNumber* nW = args[@"width"];
+        NSNumber* nH = args[@"height"];
+        NSNumber* nFps = args[@"fps"] ?: @(15);
+        FlutterRTCVideoRenderer* render = strongSelf.renders[textureId];
+        if (!render || !render.videoTrack) {
+          result([FlutterError errorWithCode:@"NO_RENDER" message:@"Renderer or videoTrack is nil" details:nil]);
+          return;
+        }
+        FrameStreamerIOS* streamer = [[FrameStreamerIOS alloc] initWithRenderer:render
+                                                                          track:render.videoTrack
+                                                                      eventSink:^(NSDictionary *event) {
+          if (strongSelf && strongSelf->_spFrameSink) strongSelf->_spFrameSink(event);
+        }
+                                                                     targetWidth:nW.intValue
+                                                                    targetHeight:nH.intValue
+                                                                             fps:nFps.intValue];
+        [streamer start];
+        strongSelf->_spStreamers[textureId] = streamer;
+        result(@(YES));
+      } else if ([call.method isEqualToString:@"stopTextureFrameStream"]) {
+        for (NSNumber* key in [strongSelf->_spStreamers allKeys]) {
+          FrameStreamerIOS* s = strongSelf->_spStreamers[key];
+          [s stop];
+        }
+        [strongSelf->_spStreamers removeAllObjects];
+        result(nil);
+      } else {
+        result(FlutterMethodNotImplemented);
+      }
+    }];
 
 #if TARGET_OS_IPHONE
     _preferredInput = AVAudioSessionPortHeadphones;
@@ -218,6 +314,21 @@ static FlutterWebRTCPlugin *sharedSingleton;
     peerConnection.eventSink = nil;
   }
   _eventSink = nil;
+  // Cleanup SwoshPro frame stream channels
+  if (_spFrameCtlChannel) {
+    [_spFrameCtlChannel setMethodCallHandler:nil];
+    _spFrameCtlChannel = nil;
+  }
+  if (_spFrameEventChannel) {
+    [_spFrameEventChannel setStreamHandler:nil];
+    _spFrameEventChannel = nil;
+  }
+  for (NSNumber* key in _spStreamers) {
+    FrameStreamerIOS* s = _spStreamers[key];
+    [s stop];
+  }
+  [_spStreamers removeAllObjects];
+  _spFrameSink = nil;
 }
 
 #pragma mark - FlutterStreamHandler methods
